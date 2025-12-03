@@ -1,0 +1,206 @@
+---
+title: "p8105_hw6_yc4804"
+author: "Yilin Cai"
+date: "2025-12-03"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Problem 1
+
+```{r}
+
+#data preparation
+library(tidyverse)
+library(broom)
+
+homicide <- 
+  read_csv("data/homicide-data.csv") %>%
+  mutate(
+    # City, State label
+    city_state = str_c(city, ", ", state),
+    
+    # Binary solved indicator
+    solved = case_when(
+      disposition == "Closed by arrest" ~ 1,
+      disposition %in% c("Open/No arrest", "Closed without arrest") ~ 0,
+      TRUE ~ NA_real_
+    ),
+    
+    # Make sure age is numeric
+    victim_age = as.numeric(victim_age)
+  ) %>%
+  # Drop cities with race issues / data errors
+  filter(
+    !city_state %in% c("Dallas, TX", "Phoenix, AZ", "Kansas City, MO", "Tulsa, AL")
+  ) %>%
+  # Keep only Black / White victims
+  filter(victim_race %in% c("White", "Black")) %>%
+  # Keep only Male / Female (drop “Unknown”, etc.)
+  filter(victim_sex %in% c("Male", "Female"))
+
+view(homicide)
+```
+
+```{r}
+baltimore <- 
+  homicide %>%
+  filter(city_state == "Baltimore, MD") %>%
+  drop_na(solved, victim_age, victim_sex, victim_race)
+
+baltimore_fit <- glm(
+  solved ~ victim_age + victim_sex + victim_race,
+  data   = baltimore,
+  family = binomial()
+)
+
+baltimore_or <- 
+  baltimore_fit %>%
+  tidy(exponentiate = TRUE, conf.int = TRUE) %>%
+  filter(term == "victim_sexMale") %>%
+  select(term, estimate, conf.low, conf.high)
+
+baltimore_or
+
+```
+
+```{r}
+library(purrr)
+
+city_ors <- 
+  homicide %>%
+  drop_na(solved, victim_age, victim_sex, victim_race) %>%
+  group_by(city_state) %>%
+  nest() %>%
+  mutate(
+    # Fit logistic model for each city
+    fit = map(
+      data,
+      ~ glm(
+        solved ~ victim_age + victim_sex + victim_race,
+        data   = .x,
+        family = binomial()
+      )
+    ),
+    # Tidy each model, returning ORs + CIs
+    tidy = map(fit, ~ tidy(.x, exponentiate = TRUE, conf.int = TRUE))
+  ) %>%
+  unnest(tidy) %>%
+  # Keep only the Male vs Female contrast
+  filter(term == "victim_sexMale") %>%
+  ungroup() %>%
+  select(city_state, estimate, conf.low, conf.high)
+
+city_ors
+
+```
+
+```{r}
+library(forcats)
+library(ggplot2)
+
+city_ors %>%
+  mutate(city_state = fct_reorder(city_state, estimate)) %>%
+  ggplot(aes(x = city_state, y = estimate)) +
+  geom_point() +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0) +
+  geom_hline(yintercept = 1, linetype = "dashed") +
+  coord_flip() +
+  labs(
+    x     = NULL,
+    y     = "Adjusted OR (Male vs Female victim)",
+    title = "Association between victim sex and homicide clearance by city"
+  )
+
+```
+
+The dashed vertical line at OR = 1 represents the point of no difference in homicide clearance between male and female victims. Cities with estimates and confidence intervals entirely below this line indicate that homicides of male victims are less likely to be solved, while points crossing the line suggest no statistically clear difference. Overall, most cities fall below the line, showing a consistent pattern of lower clearance rates for male-victim homicides.
+
+## Problem 2
+
+```{r}
+library(tidyverse)
+library(p8105.datasets)
+library(broom)
+library(modelr)
+
+data("weather_df")
+
+set.seed(123)   # for reproducibility
+
+# 1. Make 5000 bootstrap samples and fit the model
+#    tmax ~ tmin + prcp to each sample
+
+boot_results <- 
+  weather_df %>%
+  # make 5000 bootstrap resamples
+  bootstrap(n = 5000, id = "boot_id") %>%
+  # fit model to each resample
+  mutate(
+    fit   = map(strap, ~ lm(tmax ~ tmin + prcp, data = .x)),
+    glnc  = map(fit, glance),
+    tidy  = map(fit, tidy)
+  ) %>%
+  # extract r^2
+  mutate(
+    r2 = map_dbl(glnc, "r.squared")
+  ) %>%
+  # extract β1 / β2 (tmin / prcp)
+  mutate(
+    beta_ratio = map_dbl(
+      tidy,
+      ~ .x %>%
+        filter(term %in% c("tmin", "prcp")) %>%
+        select(term, estimate) %>%
+        pivot_wider(names_from = term, values_from = estimate) %>%
+        transmute(ratio = tmin / prcp) %>%
+        pull(ratio)
+    )
+  ) %>%
+  select(boot_id, r2, beta_ratio)
+
+
+# 2. Plot bootstrap distributions
+
+# r^2 distribution
+boot_results %>%
+  ggplot(aes(x = r2)) +
+  geom_histogram(bins = 40) +
+  labs(
+    x = expression(R^2),
+    y = "Count",
+    title = "Bootstrap distribution of R-squared"
+  )
+
+
+# β1 / β2 distribution
+boot_results %>%
+  ggplot(aes(x = beta_ratio)) +
+  geom_histogram(bins = 40) +
+  labs(
+    x = expression(hat(beta)[1] / hat(beta)[2]),
+    y = "Count",
+    title = "Bootstrap distribution of beta1 / beta2"
+  )
+
+
+# 3. 95% bootstrap CIs (2.5% and 97.5% quantiles)
+
+boot_CIs <- 
+  boot_results %>%
+  summarise(
+    r2_lower        = quantile(r2, 0.025),
+    r2_upper        = quantile(r2, 0.975),
+    ratio_lower     = quantile(beta_ratio, 0.025),
+    ratio_upper     = quantile(beta_ratio, 0.975)
+  )
+
+boot_CIs
+
+```
+The bootstrap distribution of R^2 is approximately symmetric and tightly concentrated around about 0.94, indicating that the linear model consistently explains a very large portion of the variability in tmax. The spread is small, with most bootstrap samples falling within a narrow range (roughly 0.938–0.945). This suggests that the model’s explanatory power is very stable across resampled datasets.
+
+The distribution of the ratio beta1/beta2 is much more skewed and substantially more variable than the distribution of R^2. Most values fall between about –300 and –150, but the long left tail shows occasional extreme ratios driven by very small estimated values of beta2. This indicates that the relative size of the two coefficients is far less stable and more sensitive to sampling variation than the model’s overall fit.
