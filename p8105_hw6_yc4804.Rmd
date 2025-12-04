@@ -204,3 +204,154 @@ boot_CIs
 The bootstrap distribution of R^2 is approximately symmetric and tightly concentrated around about 0.94, indicating that the linear model consistently explains a very large portion of the variability in tmax. The spread is small, with most bootstrap samples falling within a narrow range (roughly 0.938–0.945). This suggests that the model’s explanatory power is very stable across resampled datasets.
 
 The distribution of the ratio beta1/beta2 is much more skewed and substantially more variable than the distribution of R^2. Most values fall between about –300 and –150, but the long left tail shows occasional extreme ratios driven by very small estimated values of beta2. This indicates that the relative size of the two coefficients is far less stable and more sensitive to sampling variation than the model’s overall fit.
+
+#Problem 3
+
+```{r}
+library(tidyverse)
+library(modelr)
+library(broom)
+
+set.seed(123)  # for reproducibility
+
+birthweight <- 
+  read_csv("data/birthweight.csv") %>%
+  # convert appropriate variables to factors
+  mutate(
+    babysex = factor(babysex, levels = c(1, 2),
+                     labels = c("male", "female")),
+    malform = factor(malform, levels = c(0, 1),
+                     labels = c("absent", "present")),
+    frace = factor(frace,
+                   levels = c(1, 2, 3, 4, 8, 9),
+                   labels = c("White", "Black", "Asian",
+                              "Puerto Rican", "Other", "Unknown")),
+    mrace = factor(mrace,
+                   levels = c(1, 2, 3, 4, 8),
+                   labels = c("White", "Black", "Asian",
+                              "Puerto Rican", "Other"))
+  )
+
+# check missingness
+birthweight %>% 
+  summarise(across(everything(), \(x) sum(is.na(x))))
+
+# drop rows with missing data (if any)
+birthweight <- birthweight %>% drop_na()
+
+```
+
+```{r}
+bw_mod_main <- lm(
+  bwt ~ babysex + bhead + blength + gaweeks +
+    ppbmi + smoken + wtgain + mrace +
+    momage + parity,
+  data = birthweight
+)
+
+summary(bw_mod_main)
+
+```
+
+```{r}
+birthweight %>%
+  add_predictions(bw_mod_main) %>%
+  add_residuals(bw_mod_main) %>%
+  ggplot(aes(x = pred, y = resid)) +
+  geom_point(alpha = 0.3) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(
+    x = "Fitted values",
+    y = "Residuals",
+    title = "Residuals vs fitted values for main birthweight model"
+  )
+
+```
+
+To construct a regression model for birthweight, I began by considering predictors that are biologically or clinically known to influence fetal growth. Variables that directly measure the baby’s size at birth (head circumference and length) were included because they are strongly correlated with birthweight. I also added gestational age, since longer pregnancies generally result in heavier infants, and several maternal factors—pre-pregnancy BMI, smoking, weight gain, maternal race, age, and parity—because these capture nutritional status, health behaviors, and demographic influences that could affect fetal development. I avoided unnecessary interactions or highly collinear combinations to keep the model interpretable and stable. After fitting the model, I examined a residuals-versus-fitted plot to check for systematic patterns and verify that the linear model assumptions were not severely violated. Overall, this approach blends subject-matter reasoning with a data-driven check of model performance.
+
+```{r}
+# Model A: length + gestational age (main effects)
+bw_mod_len_age <- lm(
+  bwt ~ blength + gaweeks,
+  data = birthweight
+)
+
+# Model B: head, length, sex + all interactions (including 3-way)
+bw_mod_big_int <- lm(
+  bwt ~ bhead * blength * babysex,
+  data = birthweight
+)
+
+```
+
+```{r}
+set.seed(123)
+
+cv_df <- 
+  crossv_mc(birthweight, n = 100) %>%
+  mutate(
+    train = map(train, as_tibble),
+    test  = map(test,  as_tibble),
+
+    # fit all three models in each training split
+    mod_main = map(train, ~ lm(
+      bwt ~ babysex + bhead + blength + gaweeks +
+        ppbmi + smoken + wtgain + mrace +
+        momage + parity,
+      data = .x
+    )),
+    mod_len_age = map(train, ~ lm(
+      bwt ~ blength + gaweeks,
+      data = .x
+    )),
+    mod_big_int = map(train, ~ lm(
+      bwt ~ bhead * blength * babysex,
+      data = .x
+    )),
+
+    # compute RMSE on the test split
+    rmse_main    = map2_dbl(mod_main,    test, ~ rmse(.x, .y)),
+    rmse_len_age = map2_dbl(mod_len_age, test, ~ rmse(.x, .y)),
+    rmse_big_int = map2_dbl(mod_big_int, test, ~ rmse(.x, .y))
+  )
+
+```
+
+```{r}
+cv_results <- 
+  cv_df %>%
+  select(starts_with("rmse_")) %>%
+  pivot_longer(
+    everything(),
+    names_to = "model",
+    values_to = "rmse"
+  ) %>%
+  mutate(
+    model = recode(
+      model,
+      rmse_main    = "My model",
+      rmse_len_age = "Length + gestational age",
+      rmse_big_int = "Head*length*sex (all interactions)"
+    )
+  )
+
+# boxplot of cross-validated RMSE by model
+cv_results %>%
+  ggplot(aes(x = model, y = rmse)) +
+  geom_boxplot() +
+  labs(
+    x = NULL,
+    y = "RMSE (cross-validated prediction error)",
+    title = "Comparison of birthweight models via cross-validated RMSE"
+  )
+
+
+cv_results %>%
+  group_by(model) %>%
+  summarise(mean_rmse = mean(rmse))
+
+```
+The cross-validated RMSE values show clear differences in predictive performance among the three models. The model using only length and gestational age performs the worst, with the highest median RMSE and the widest spread, indicating that these two predictors alone do not capture enough variability in birthweight. The fully interactive model using head circumference, length, sex, and all interactions performs substantially better, suggesting that the relationships among these predictors are important. However, my proposed model achieves the lowest median RMSE and the smallest variability across validation splits, indicating that it provides the most accurate and stable predictions for birthweight among the models considered.
+
+
